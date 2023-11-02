@@ -111,6 +111,8 @@ type Visitor struct {
 	tmpMtrx2       bool
 	tmpMtrx3       bool
 	tmpListaMtrx   [][]interface{}
+	tmp_xprSwitch  string
+	activate_case  bool
 }
 
 func AgregarErrorSemantico(mensaje string, lines string, columna string) {
@@ -501,6 +503,7 @@ func (v *Visitor) VisitReasignacion(ctx *parser.ReasignacionContext) Value {
 	var scope interface{}
 	var primitivetype interface{}
 	var currentValue interface{}
+	tmp_heap := Cont_Heap
 
 	valueToAssign := v.Visit(ctx.Expr())
 	current := v.currentEnv
@@ -518,6 +521,56 @@ func (v *Visitor) VisitReasignacion(ctx *parser.ReasignacionContext) Value {
 				if primitivetype == getType(valueToAssign.value) || currentValue == nil {
 					// Realiza la reasignación en el ámbito actual
 
+					tipo := current.variables[varID].PrimitiveType
+					if tipo == "Int" || tipo == "Float" {
+						Generator.AddComment("Reasignando una variable")
+						valueVar := fmt.Sprintf("%v", valueToAssign.temp)
+						Generator.AddSetStack(strconv.Itoa(current.variables[varID].Stack), valueVar)
+						Generator.AddBr()
+					}
+					if tipo == "Bool" {
+						Generator.AddComment("Reasignando una variable")
+						valueVar := fmt.Sprintf("%v", valueToAssign.value)
+						if valueVar == "true" {
+							valueVar = "1"
+						} else {
+							valueVar = "0"
+						}
+
+						newLabel := Generator.NewLabel()
+						for _, lvl := range valueToAssign.TrueLabel {
+							Generator.AddLabel(lvl)
+						}
+						Generator.AddSetStack(strconv.Itoa(current.variables[varID].Stack), "1")
+						Generator.AddGoto(newLabel)
+						for _, lvl := range valueToAssign.FalseLabel {
+							Generator.AddLabel(lvl)
+						}
+						Generator.AddSetStack(strconv.Itoa(current.variables[varID].Stack), "0")
+						Generator.AddGoto(newLabel)
+						Generator.AddLabel(newLabel)
+
+					}
+					if tipo == "String" {
+						Generator.AddComment("Reasignando una variable")
+						tmp_stack := Cont_Stack
+						heap := fmt.Sprintf("%v", tmp_heap)
+						Generator.AddSetStack(strconv.Itoa(tmp_stack), heap)
+
+						current.variables[varID] = Variable{
+							scope:         scope.(string),
+							Ambit:         current.variables[varID].Ambit,
+							PrimitiveType: primitivetype.(string),
+							value:         valueToAssign.value,
+							isVector:      false,
+							Line:          current.variables[varID].Line,
+							Column:        current.variables[varID].Column,
+							Stack:         Cont_Stack,
+							Heap:          tmp_heap,
+						}
+						return Value{value: true}
+
+					}
 					current.variables[varID] = Variable{
 						scope:         scope.(string),
 						Ambit:         current.variables[varID].Ambit,
@@ -529,10 +582,6 @@ func (v *Visitor) VisitReasignacion(ctx *parser.ReasignacionContext) Value {
 						Stack:         current.variables[varID].Stack,
 						Heap:          current.variables[varID].Heap,
 					}
-					Generator.AddComment("Reasignando variable")
-					valueVar := fmt.Sprintf("%v", valueToAssign.value)
-					Generator.AddSetStack(strconv.Itoa(current.variables[varID].Stack), valueVar)
-					Generator.AddBr()
 					return Value{value: true}
 				} else {
 					v.outputBuilder.WriteString(fmt.Sprintf("%v\n", "No coincide la variable "+varID+" con el tipo primitivo"+primitivetype.(string)))
@@ -1006,7 +1055,7 @@ func (v *Visitor) VisitIfElse(ctx *parser.ElseContext) Value {
 	}()
 	localEnv.size_var["size"] = 0
 	exp := v.Visit(ctx.Expr())
-
+	fmt.Println("expresion", exp)
 	for _, lvl := range exp.TrueLabel {
 		Generator.AddLabel(lvl)
 	}
@@ -1056,8 +1105,9 @@ func (v *Visitor) VisitElse_If(ctx *parser.Else_ifContext) Value {
 
 func (v *Visitor) VisitSwitchstmt(ctx *parser.SwitchstmtContext) Value {
 	v.currentAmbit = "switch"
-	expr := v.Visit(ctx.Expr()).value
-	v.exprToSwitch = expr
+	expr := v.Visit(ctx.Expr())
+	v.exprToSwitch = expr.value
+	v.tmp_xprSwitch = expr.temp.(string)
 	if ctx.Cases() != nil {
 		return v.Visit(ctx.Cases())
 	}
@@ -1065,33 +1115,57 @@ func (v *Visitor) VisitSwitchstmt(ctx *parser.SwitchstmtContext) Value {
 
 }
 func (v *Visitor) VisitCases(ctx *parser.CasesContext) Value {
-	for i := 0; ctx.Caseblock(i) != nil; i++ {
+	salida := Generator.NewLabel()
+	Generator.AddComment("Generando switch")
+	_lenCases := len(ctx.AllCaseblock())
+	for i := 0; i <= _lenCases-1; i++ {
 		v.exitSwitch = false
-		v.Visit(ctx.Caseblock(i))
-		if v.exitSwitch {
+		value := v.Visit(ctx.Caseblock(i))
+		caseValue := value.value
+		trueLabel := Generator.NewLabel()
+		falseLabel := Generator.NewLabel()
+		if i == _lenCases-1 {
+			v.activate_case = true
+			v.Visit(ctx.Caseblock(i))
+			Generator.AddLabel(falseLabel)
+		} else {
+
+			op := fmt.Sprintf("%v", v.tmp_xprSwitch)
+			valCmp := fmt.Sprintf("%v", caseValue)
+			fmt.Println("op", v.exprToSwitch)
+			fmt.Println("valCmp", valCmp)
+
+			Generator.AddIf(op, valCmp, "==", trueLabel)
+			Generator.AddGoto(falseLabel)
+			Generator.AddLabel(trueLabel)
+			v.activate_case = true
+			v.Visit(ctx.Caseblock(i))
+			Generator.AddGoto(salida)
+			Generator.AddLabel(falseLabel)
+
+		}
+		/*if v.exitSwitch {
 			v.exitSwitch = false
 			break
-		}
+		}*/
 	}
+	Generator.AddLabel(salida)
 
 	return Value{value: true}
 }
 func (v *Visitor) VisitUnCase(ctx *parser.UnCaseContext) Value {
-	value := v.Visit(ctx.Expr()).value
-	if value == v.exprToSwitch && getType(value) == getType(v.exprToSwitch) {
-		v.Visit(ctx.Block())
-		v.exitSwitch = true
-		return Value{value: true}
-	} else {
-		return Value{value: false}
+
+	if v.activate_case {
+		v.activate_case = false
+		return v.Visit(ctx.Block())
 	}
+	return v.Visit(ctx.Expr())
 
 }
 func (v *Visitor) VisitUnDefault(ctx *parser.UnDefaultContext) Value {
-	if ctx.Block() != nil {
-		return v.Visit(ctx.Block())
-	}
-	return Value{value: false}
+
+	return v.Visit(ctx.Block())
+
 }
 func (v *Visitor) VisitPrintstmt(ctx *parser.PrintstmtContext) Value {
 	visit := v
@@ -1105,6 +1179,7 @@ func (v *Visitor) VisitPrintstmt(ctx *parser.PrintstmtContext) Value {
 			val := v.Visit(ctx.Expr(i))
 			value := val.value
 			fmt.Println("Valor a imprimir", value)
+			fmt.Println(val)
 			switch v := value.(type) {
 			case [][]int64:
 				value = fmt.Sprintf("%d", v)
@@ -1199,70 +1274,89 @@ func (v *Visitor) VisitPrintstmt(ctx *parser.PrintstmtContext) Value {
 
 func (v *Visitor) VisitWhilestmt(ctx *parser.WhilestmtContext) Value {
 	v.currentAmbit = "while"
-	value, ok := v.Visit(ctx.Expr()).value.(bool)
+	localEnv := &Environment{
+		parent:    v.currentEnv,
+		variables: make(map[string]Variable),
+		functions: make(map[string]funcion),
+		size_var:  make(map[string]int),
+	}
+	previousEnv := v.currentEnv
+	v.currentEnv = localEnv
+	localEnv.size_var["size"] = 0
+	defer func() {
+		v.currentEnv = previousEnv
+	}()
 
-	for ok && value {
+	trueLabel := Generator.NewLabel()
+	Generator.AddLabel(trueLabel)
+	Generator.AddComment("Generando while")
+	condition := v.Visit(ctx.Expr())
+	fmt.Println()
+	for _, lvl := range condition.TrueLabel {
+		Generator.AddLabel(lvl)
+	}
+	_return := v.Visit(ctx.Block())
+	Generator.AddGoto(trueLabel)
+	for _, lvl := range condition.FalseLabel {
+		Generator.AddLabel(lvl)
+	}
+	return _return
+
+}
+func (v *Visitor) VisitForNormal(ctx *parser.ForNormalContext) Value {
+	v.currentAmbit = "for"
+	varID := ctx.ID().GetText()
+	exp1 := v.Visit(ctx.Expr(0))
+	exp2 := v.Visit(ctx.Expr(1))
+
+	if exp1.value.(int64) > exp2.value.(int64) {
+		v.outputBuilder.WriteString(fmt.Sprintf("%v\n", "Operación incompatible, la expresión "+exp1.value.(string)+"es mayor a "+exp2.value.(string)))
+		AgregarErrorSemantico("Operación incompatible, la expresión "+exp1.value.(string)+" es mayor a "+exp2.value.(string), strconv.Itoa(ctx.ID().GetSymbol().GetLine()), strconv.Itoa(ctx.ID().GetSymbol().GetColumn()))
+		return Value{value: false}
+	} else {
+
 		localEnv := &Environment{
 			parent:    v.currentEnv,
 			variables: make(map[string]Variable),
 			functions: make(map[string]funcion),
 			size_var:  make(map[string]int),
 		}
+
 		localEnv.size_var["size"] = 0
 		previousEnv := v.currentEnv
 		v.currentEnv = localEnv
 		defer func() {
 			v.currentEnv = previousEnv
 		}()
+		iterador := v.currentEnv.variables[varID]
+		iterador = Variable{
+			scope:         "var",
+			PrimitiveType: "Int",
+			value:         exp1.value.(int64),
+			Stack:         Cont_Stack,
+		}
+
+		label := Generator.NewLabel()
+		trueLabel := Generator.NewLabel()
+		falseLabel := Generator.NewLabel()
+		localEnv.size_var["size"]++
+		valorIterador := fmt.Sprintf("%v", exp1.temp.(int64))
+		Generator.AddSetStack(strconv.Itoa(Cont_Stack), valorIterador)
+		newTmp := Generator.NewTemp()
+		Generator.AddLabel(label)
+		Generator.AddGetStack(newTmp, strconv.Itoa(Cont_Stack))
+		exp2.temp = fmt.Sprintf("%v", exp2.temp.(int64))
+		Generator.AddIf(newTmp, exp2.temp.(string), "<=", trueLabel)
+		Generator.AddGoto(falseLabel)
+		Generator.AddLabel(trueLabel)
+		Cont_Stack++
 		v.Visit(ctx.Block())
-		if v.breakFlag { // si encuentra un break se termina el ciclo
-			v.breakFlag = false
-			break
-		}
-		value, ok = v.Visit(ctx.Expr()).value.(bool)
+		Generator.AddGetStack(newTmp, strconv.Itoa(iterador.Stack))
+		Generator.AddExpression(newTmp, newTmp, "1", "+")
+		Generator.AddSetStack(strconv.Itoa(iterador.Stack), newTmp)
+		Generator.AddGoto(label)
+		Generator.AddLabel(falseLabel)
 
-	}
-	return Value{value: true}
-}
-func (v *Visitor) VisitForNormal(ctx *parser.ForNormalContext) Value {
-	v.currentAmbit = "for"
-	varID := ctx.ID().GetText()
-	exp1 := v.Visit(ctx.Expr(0)).value
-	exp2 := v.Visit(ctx.Expr(1)).value
-
-	if exp1.(int64) > exp2.(int64) {
-		v.outputBuilder.WriteString(fmt.Sprintf("%v\n", "Operación incompatible, la expresión "+exp1.(string)+"es mayor a "+exp2.(string)))
-		AgregarErrorSemantico("Operación incompatible, la expresión "+exp1.(string)+" es mayor a "+exp2.(string), strconv.Itoa(ctx.ID().GetSymbol().GetLine()), strconv.Itoa(ctx.ID().GetSymbol().GetColumn()))
-		return Value{value: false}
-	} else {
-		for exp1.(int64) <= exp2.(int64) {
-			v.currentEnv.variables[varID] = Variable{
-				scope:         "var",
-				PrimitiveType: "Int",
-				value:         exp1.(int64),
-			}
-			loopBlock := ctx.Block()
-			localEnv := &Environment{
-				parent:    v.currentEnv,
-				variables: make(map[string]Variable),
-				functions: make(map[string]funcion),
-				size_var:  make(map[string]int),
-			}
-			localEnv.size_var["size"] = 0
-			previousEnv := v.currentEnv
-			v.currentEnv = localEnv
-			defer func() {
-				v.currentEnv = previousEnv
-			}()
-			v.Visit(loopBlock)
-
-			if v.breakFlag { // si encuentra un break se termina el ciclo
-				v.breakFlag = false
-				break
-			}
-			exp1 = exp1.(int64) + 1
-
-		}
 		return Value{value: true}
 	}
 }
@@ -2354,6 +2448,7 @@ func (v *Visitor) VisitStrExpr(ctx *parser.StrExprContext) Value {
 		Generator.AddExpression("H", "H", "1", "+")
 		Cont_Heap++
 	}
+	fmt.Println("Contador de heap: ", Cont_Heap)
 	Cont_Heap++
 	//caracteres de escape
 	Generator.AddSetHeap("(int)H", "-1")
@@ -2722,7 +2817,9 @@ func (v *Visitor) VisitOpExpr(ctx *parser.OpExprContext) Value {
 		Generator.AddLabel(lvl1)
 		Generator.AddExpression(newTmp, tmp_izq, tmpr_der, "/")
 		Generator.AddLabel(lvl2)
-
+		if l.(int64) == 0 || r.(int64) == 0 {
+			return Value{value: 0, temp: newTmp}
+		}
 		if type_left == "Float" && type_right == "Float" {
 
 			return Value{value: l.(float64) / r.(float64), temp: newTmp}
